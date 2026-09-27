@@ -670,6 +670,36 @@ const ShortsPage: React.FC = () => {
         </div>
       </div>
 
+      {uploading && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/75">
+          <div className="w-72 max-w-[85vw] text-center text-white">
+            <div className="mx-auto mb-3 h-10 w-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <p className="text-sm font-semibold mb-1">
+              {uploadPhase === 'saving' ? 'Publication du Short…' : 'Envoi de la vidéo…'}
+            </p>
+            <p className="text-xs text-white/70 mb-3 truncate">
+              {uploadFileName}
+              {uploadPhase === 'uploading' && uploadProgress > 0 ? ` — ${uploadProgress}%` : ''}
+            </p>
+            {uploadPhase === 'uploading' && (
+              <div className="h-2 w-full rounded-full bg-white/20 overflow-hidden mb-3">
+                <div
+                  className="h-full rounded-full bg-white transition-all duration-300"
+                  style={{ width: `${Math.max(uploadProgress, 4)}%` }}
+                />
+              </div>
+            )}
+            {uploadSlow && uploadPhase === 'uploading' && (
+              <p className="text-xs text-yellow-300 mb-3">
+                Transfert lent — connexion faible. Vous pouvez patienter ou annuler.
+              </p>
+            )}
+            <Button size="sm" variant="outline" className="border-white text-white bg-transparent hover:bg-white hover:text-black" onClick={cancelUpload}>
+              Annuler
+            </Button>
+          </div>
+        </div>
+      )}
 
       {newCount > 0 && (
         <button
