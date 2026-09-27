@@ -561,7 +561,7 @@ const ShortsPage: React.FC = () => {
 
       const ext = file.name.split('.').pop() || 'mp4';
       const path = `${currentUser}/shorts/${Date.now()}.${ext}`;
-      const url = `${supabase.supabaseUrl}/storage/v1/object/profile-files/${path.split('/').map(encodeURIComponent).join('/')}`;
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/profile-files/${path.split('/').map(encodeURIComponent).join('/')}`;
 
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
