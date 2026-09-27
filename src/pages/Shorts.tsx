@@ -72,6 +72,11 @@ const ShortsPage: React.FC = () => {
   const flushTimer = useRef<any>(null);
   const [newCount, setNewCount] = useState(0);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadPhase, setUploadPhase] = useState<'uploading' | 'saving'>('uploading');
+  const [uploadSlow, setUploadSlow] = useState(false);
+  const [uploadFileName, setUploadFileName] = useState('');
+  const uploadXhrRef = useRef<XMLHttpRequest | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const latestCreatedAt = useRef<string | null>(null);
 
@@ -526,17 +531,82 @@ const ShortsPage: React.FC = () => {
     setReplyTo(null);
   };
 
+  const MAX_SHORT_SIZE = 200 * 1024 * 1024; // 200 MB
+
+  const cancelUpload = () => {
+    uploadXhrRef.current?.abort();
+  };
+
   const handleUploadShort = async (file: File) => {
     if (!file) return;
     if (!currentUser) { toast.error('Connectez-vous pour publier'); return; }
+    if (!file.type.startsWith('video/')) {
+      toast.error(`Format non accepté (${file.type || 'inconnu'}). Choisissez une vidéo (MP4, MOV, WEBM…).`);
+      return;
+    }
+    if (file.size > MAX_SHORT_SIZE) {
+      toast.error(`Fichier trop volumineux (${Math.round(file.size / (1024 * 1024))} Mo). Maximum : 200 Mo.`);
+      return;
+    }
     setUploading(true);
+    setUploadProgress(0);
+    setUploadPhase('uploading');
+    setUploadSlow(false);
+    setUploadFileName(file.name);
+    const startedAt = Date.now();
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) { toast.error('Session expirée. Reconnectez-vous puis réessayez.'); return; }
+
       const ext = file.name.split('.').pop() || 'mp4';
       const path = `${currentUser}/shorts/${Date.now()}.${ext}`;
-      const { error: upErr } = await supabase.storage
-        .from('profile-files')
-        .upload(path, file, { contentType: file.type, upsert: false });
-      if (upErr) throw upErr;
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/profile-files/${path.split('/').map(encodeURIComponent).join('/')}`;
+
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        uploadXhrRef.current = xhr;
+        xhr.open('POST', url, true);
+        xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        xhr.setRequestHeader('x-upsert', 'false');
+        if (file.type) xhr.setRequestHeader('Content-Type', file.type);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            setUploadProgress(Math.round((e.loaded / e.total) * 100));
+            if (Date.now() - startedAt > 15000) setUploadSlow(true);
+          }
+        };
+        xhr.timeout = 180000; // 3 min max
+        xhr.ontimeout = () => reject(new Error("Le transfert a trop duré (plus de 3 minutes). Vérifiez votre connexion puis réessayez."));
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
+          let msg = `Échec de l'envoi (code ${xhr.status}). Réessayez.`;
+          try {
+            const body = JSON.parse(xhr.responseText || '{}');
+            const detail = (body.message || body.error || '').toString().toLowerCase();
+            if (xhr.status === 413 || xhr.status === 422 || detail.includes('size') || detail.includes('too large')) {
+              msg = `Fichier trop volumineux (max 200 Mo).`;
+            } else if (xhr.status === 401 || xhr.status === 403) {
+              msg = 'Session expirée. Reconnectez-vous puis réessayez.';
+            } else if (xhr.status === 409) {
+              msg = 'Un fichier identique existe déjà. Réessayez.';
+            } else if (detail) {
+              msg = `Échec de l'envoi : ${body.message || body.error}`;
+            }
+          } catch { /* keep default message */ }
+          reject(new Error(msg));
+        };
+        xhr.onerror = () => reject(new Error("Connexion interrompue pendant l'envoi. Vérifiez votre réseau puis réessayez."));
+        xhr.onabort = () => {
+          const err = new Error('Upload annulé') as Error & { aborted?: boolean };
+          err.aborted = true;
+          reject(err);
+        };
+        xhr.send(file);
+      });
+
+      // Storage OK → save the short in the feed
+      setUploadPhase('saving');
       const { data: urlData } = supabase.storage.from('profile-files').getPublicUrl(path);
       const { error } = await supabase.from('talent_media').insert({
         user_id: currentUser,
@@ -544,14 +614,24 @@ const ShortsPage: React.FC = () => {
         url: urlData.publicUrl,
         title: file.name.replace(/\.[^.]+$/, '').slice(0, 80) || null,
       });
-      if (error) throw error;
+      if (error) {
+        toast.error(`La vidéo a été envoyée mais la publication a échoué : ${error.message}`);
+        return;
+      }
       toast.success('Short publié !');
       // Realtime listener will prepend, but also refresh to be safe
       refreshTop();
     } catch (e: any) {
-      toast.error(e?.message || 'Erreur lors de la publication');
+      if (e?.aborted) {
+        toast.info('Upload annulé');
+      } else {
+        toast.error(e?.message || "Erreur lors de la publication. Réessayez.");
+      }
     } finally {
       setUploading(false);
+      setUploadProgress(0);
+      setUploadSlow(false);
+      uploadXhrRef.current = null;
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -590,6 +670,36 @@ const ShortsPage: React.FC = () => {
         </div>
       </div>
 
+      {uploading && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/75">
+          <div className="w-72 max-w-[85vw] text-center text-white">
+            <div className="mx-auto mb-3 h-10 w-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <p className="text-sm font-semibold mb-1">
+              {uploadPhase === 'saving' ? 'Publication du Short…' : 'Envoi de la vidéo…'}
+            </p>
+            <p className="text-xs text-white/70 mb-3 truncate">
+              {uploadFileName}
+              {uploadPhase === 'uploading' && uploadProgress > 0 ? ` — ${uploadProgress}%` : ''}
+            </p>
+            {uploadPhase === 'uploading' && (
+              <div className="h-2 w-full rounded-full bg-white/20 overflow-hidden mb-3">
+                <div
+                  className="h-full rounded-full bg-white transition-all duration-300"
+                  style={{ width: `${Math.max(uploadProgress, 4)}%` }}
+                />
+              </div>
+            )}
+            {uploadSlow && uploadPhase === 'uploading' && (
+              <p className="text-xs text-yellow-300 mb-3">
+                Transfert lent — connexion faible. Vous pouvez patienter ou annuler.
+              </p>
+            )}
+            <Button size="sm" variant="outline" className="border-white text-white bg-transparent hover:bg-white hover:text-black" onClick={cancelUpload}>
+              Annuler
+            </Button>
+          </div>
+        </div>
+      )}
 
       {newCount > 0 && (
         <button
